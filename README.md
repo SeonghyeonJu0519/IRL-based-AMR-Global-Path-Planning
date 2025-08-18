@@ -1,135 +1,88 @@
-# Inverse Reinforcement Learning
+## Inverse Reinforcement Learning – Grid Path Planning (IRL/DRL/Classic)
 
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.555999.svg)](https://doi.org/10.5281/zenodo.555999)
+이 저장소는 격자(Gridworld) 환경에서의 경로 계획을 다양한 방법으로 비교합니다.
 
-Implements selected inverse reinforcement learning (IRL) algorithms as part of COMP3710, supervised by Dr Mayank Daswani and Dr Marcus Hutter. My final report is available [here](https://alger.au/pdfs/irl.pdf) and describes the implemented algorithms.
+- **수리모델**: Dijkstra, Value Iteration
+- **IRL**: MaxEnt IRL 기반 보상 학습 후 탐색(irl_guided_search)
+- **DRL**: 개선된 DQN(비교용)
+- **분석 출력**: 경로 시각화, 연산량(operations/expansions/inferences), 비교 그래프
 
-If you use this code in your work, you can cite it as follows:
-```bibtex
-@misc{alger16,
-  author       = {Matthew Alger},
-  title        = {Inverse Reinforcement Learning},
-  year         = 2016,
-  doi          = {10.5281/zenodo.555999},
-  url          = {https://doi.org/10.5281/zenodo.555999}
-}
+### 1) 빠른 시작
+
+- Python 3.9+ 권장
+- 필수 패키지 설치(없으면 아래 최소 세트 설치)
+
+```bash
+pip install numpy matplotlib torch psutil
 ```
 
-## Algorithms implemented
+실행:
 
-- Linear programming IRL. From Ng & Russell, 2000. Small state space and large state space linear programming IRL.
-- Maximum entropy IRL. From Ziebart et al., 2008.
-- Deep maximum entropy IRL. From Wulfmeier et al., 2015; original derivation.
+```bash
+python examples/all_path_planning_comparison.py
+```
 
-Additionally, the following MDP domains are implemented:
-- Gridworld (Sutton, 1998)
-- Objectworld (Levine et al., 2011)
+출력물:
 
-## Requirements
-- NumPy
-- SciPy
-- CVXOPT
-- Theano
-- MatPlotLib (for examples)
+- 경로 시각화: `paths_10x10.png`, `paths_50x50.png`, `paths_70x70.png`, `paths_100x100.png`
+- 성능 비교 그래프: `performance_comparison.png`
+- 콘솔에 환경별 요약(길이/연산량/추론횟수 등)
 
-## Module documentation
+### 2) 주요 스크립트
 
-Following is a brief list of functions and classes exported by modules. Full documentation is included in the docstrings of each function or class; only functions and classes intended for use outside the module are documented here.
+- `examples/all_path_planning_comparison.py`
 
-### linear_irl
+  - 공통 비교 드라이버. 환경 생성 → Dijkstra/IRL/DQN 실행 → 시각화/요약 출력
+  - 기본 장애물 밀도는 20%로 설정되어 있습니다. 상단의 `obstacle_density` 값으로 조정하세요.
 
-Implements linear programming inverse reinforcement learning (Ng & Russell, 2000).
+- `examples/amr_path_planning_irl.py`
 
-**Functions:**
+  - `AMRGridworld` 환경, 수리모델 플래너, IRL(맥스엔트) 학습/추론 유틸 포함
+  - `create_connected_environment()`가 활성화되어 있어 높은 밀도에서도 경로가 완전히 막히지 않도록 일부 장애물을 제거하며 연결 가능 환경을 보장합니다.
 
-- `irl(n_states, n_actions, transition_probability, policy, discount, Rmax, l1)`: Find a reward function with inverse RL.
-- `large_inverseRL(value, transition_probability, feature_matrix, n_states, n_actions, policy)`: Find the reward in a large state space.
+- `examples/improved_dqn_path_planning.py`
+  - 비교용 DQN 학습/경로계획 구현. 작은 지도(예: 10x10, 20% 내외)에서 비교가 용이합니다.
 
-### maxent
-    
-Implements maximum entropy inverse reinforcement learning (Ziebart et al., 2008).
+### 3) IRL 모델 준비(선택)
 
-**Functions:**
+IRL 모델이 없으면 IRL 단계에서 “model not found” 메시지가 출력됩니다. 아래로 학습 후 사용하세요.
 
-- `irl(feature_matrix, n_actions, discount, transition_probability, trajectories, epochs, learning_rate)`: Find the reward function for the given trajectories.
-- `find_svf(feature_matrix, n_actions, discount, transition_probability, trajectories, epochs, learning_rate)`: Find the state visitation frequency from trajectories.
-- `find_feature_expectations(feature_matrix, trajectories)`:  Find the feature expectations for the given trajectories. This is the average path feature vector.
-- `find_expected_svf(n_states, r, n_actions, discount, transition_probability, trajectories)`: Find the expected state visitation frequencies using algorithm 1 from Ziebart et al. 2008.
-- `expected_value_difference(n_states, n_actions, transition_probability, reward, discount, p_start_state, optimal_value, true_reward)`: Calculate the expected value difference, which is a proxy to how good a recovered reward function is.
+```bash
+python examples/dijkstra_irl_learning.py  # 데모 IRL 학습/저장
+```
 
-### deep_maxent
+기본 저장 경로(예시): `saved_models/10x10_dijkstra/irl_model_10x10_Dijkstra.pth`
 
-Implements deep maximum entropy inverse reinforcement learning based on Ziebart et al., 2008 and Wulfmeier et al., 2015, using symbolic methods with Theano.
+### 4) 설정 포인트
 
-**Functions:**
+- 장애물 밀도: `examples/all_path_planning_comparison.py` 하단의 `obstacle_density` 값을 조정
+- 평가 격자 크기: `grid_sizes = [10, 50, 70, 100]` 리스트 변경
+- DQN 학습 에피소드: 복잡도에 따라 자동 조정되며, 필요 시 `run_algorithms_safe()` 내부 설정을 수정
 
-- `irl(structure, feature_matrix, n_actions, discount, transition_probability, trajectories, epochs, learning_rate, initialisation="normal", l1=0.1, l2=0.1)`: Find the reward function for the given trajectories.
-- `find_svf(n_states, trajectories)`: Find the state vistiation frequency from trajectories.
-- `find_expected_svf(n_states, r, n_actions, discount, transition_probability, trajectories)`: Find the expected state visitation frequencies using algorithm 1 from Ziebart et al. 2008.
+### 5) 자주 묻는 질문(FAQ)
 
-### value_iteration
+- Q: 30% 장애물에서 10x10이 막혀요.
 
-Find the value function associated with a policy. Based on Sutton & Barto, 1998.
+  - A: 기본은 `create_connected_environment()`가 경로 연결을 보장합니다. 완전 원시 환경을 쓰려면 해당 호출을 직접 `AMRGridworld(...)`로 바꾸세요(경로가 없을 수 있음).
 
-**Functions:**
+- Q: DQN이 목표에 못 갑니다.
 
-- `value(policy, n_states, transition_probabilities, reward, discount, threshold=1e-2)`: Find the value function associated with a policy.
-- `optimal_value(n_states, n_actions, transition_probabilities, reward, discount, threshold=1e-2)`: Find the optimal value function.
-- `find_policy(n_states, n_actions, transition_probabilities, reward, discount, threshold=1e-2, v=None, stochastic=True)`: Find the optimal policy.
+  - A: 작은 지도(10x10, 15~20% 밀도)에서 에피소드 수를 늘리거나(예: 600~1000) 최소 ε을 너무 빨리 낮추지 않도록 설정하세요. 수리모델/IRL은 전역 최적 경로를 보장/근사하므로 비교 기준으로 사용하십시오.
 
-### mdp
+- Q: CUDA 메모리 오류가 납니다.
+  - A: 실행 전 캐시 정리(`clear_gpu_memory()`)가 포함되어 있습니다. 여전히 문제가 있으면 CPU로 실행하거나 배치 크기를 줄이세요.
 
-#### gridworld
+### 6) 저장소 구조(요약)
 
-Implements the gridworld MDP.
+```
+examples/
+  all_path_planning_comparison.py   # 메인 비교 스크립트
+  amr_path_planning_irl.py          # 환경/IRL/수리모델
+  improved_dqn_path_planning.py     # DQN 비교(학습/경로계획)
+irl/
+  maxent.py 등                      # IRL 알고리즘 구현
+```
 
-**Classes, instance attributes, methods:**
+### 7) 라이선스
 
-- `Gridworld(grid_size, wind, discount)`: Gridworld MDP.
-    - `actions`: Tuple of (dx, dy) actions.
-    - `n_actions`: Number of actions. int.
-    - `n_states`: Number of states. int.
-    - `grid_size`: Size of grid. int.
-    - `wind`: Chance of moving randomly. float.
-    - `discount`: MDP discount factor. float.
-    - `transition_probability`: NumPy array with shape (n_states, n_actions, n_states) where `transition_probability[si, a, sk]` is the probability of transitioning from state si to state sk under action a.
-    - `feature_vector(i, feature_map="ident")`: Get the feature vector associated with a state integer.
-    - `feature_matrix(feature_map="ident")`: Get the feature matrix for this gridworld.
-    - `int_to_point(i)`: Convert a state int into the corresponding coordinate.
-    - `point_to_int(p)`: Convert a coordinate into the corresponding state int.
-    - `neighbouring(i, k)`: Get whether two points neighbour each other. Also returns true if they are the same point.
-    - `reward(state_int)`: Reward for being in state state_int.
-    - `average_reward(n_trajectories, trajectory_length, policy)`: Calculate the average total reward obtained by following a given policy over n_paths paths.
-    - `optimal_policy(state_int)`: The optimal policy for this gridworld.
-    - `optimal_policy_deterministic(state_int)`: Deterministic version of the optimal policy for this gridworld.
-    - `generate_trajectories(n_trajectories, trajectory_length, policy, random_start=False)`: Generate n_trajectories trajectories with length trajectory_length, following the given policy.
-
-#### objectworld
-
-Implements the objectworld MDP described in Levine et al. 2011.
-
-**Classes, instance attributes, methods:**
-
-- `OWObject(inner_colour, outer_colour)`: Object in objectworld.
-    - `inner_colour`: Inner colour of object. int.
-    - `outer_colour`: Outer colour of object. int.
-
-- `Objectworld(grid_size, n_objects, n_colours, wind, discount)`: Objectworld MDP.
-    - `actions`: Tuple of (dx, dy) actions.
-    - `n_actions`: Number of actions. int.
-    - `n_states`: Number of states. int.
-    - `grid_size`: Size of grid. int.
-    - `n_objects`: Number of objects in the world. int.
-    - `n_colours`: Number of colours to colour objects with. int.
-    - `wind`: Chance of moving randomly. float.
-    - `discount`: MDP discount factor. float.
-    - `objects`: Set of objects in the world.
-    - `transition_probability`: NumPy array with shape (n_states, n_actions, n_states) where `transition_probability[si, a, sk]` is the probability of transitioning from state si to state sk under action a.
-    - `feature_vector(i, discrete=True)`: Get the feature vector associated with a state integer.
-    - `feature_matrix(discrete=True)`: Get the feature matrix for this gridworld.
-    - `int_to_point(i)`: Convert a state int into the corresponding coordinate.
-    - `point_to_int(p)`: Convert a coordinate into the corresponding state int.
-    - `neighbouring(i, k)`: Get whether two points neighbour each other. Also returns true if they are the same point.
-    - `reward(state_int)`: Reward for being in state state_int.
-    - `average_reward(n_trajectories, trajectory_length, policy)`: Calculate the average total reward obtained by following a given policy over n_paths paths.
-    - `generate_trajectories(n_trajectories, trajectory_length, policy)`: Generate n_trajectories trajectories with length trajectory_length, following the given policy.
+`LICENSE` 파일을 참고하세요.
