@@ -1,0 +1,14 @@
+{
+  "algorithm": "dijkstra",
+  "grid_size": 10,
+  "obstacle_density": 0.15,
+  "dynamic_obstacles": 2,
+  "path_generation_time": 0.028701199975330383,
+  "path_generation_memory": 0.0625,
+  "irl_training_time": 2.1910769999958575,
+  "irl_training_memory": 641.87890625,
+  "total_training_time": 2.219778199971188,
+  "expert_trajectories_count": 100,
+  "feature_dim": 10,
+  "reward_dim": 100
+}
