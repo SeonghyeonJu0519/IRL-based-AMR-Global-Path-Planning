@@ -6,8 +6,8 @@ import copy
 import time
 import os
 import gc
-from amr_path_planning_irl import AMRGridworld, extract_features, irl_guided_search
-from dijkstra_irl_learning import load_model
+from irl_training.amr_path_planning_irl import AMRGridworld, extract_features, irl_guided_search
+from irl_training.dijkstra_irl_learning import load_model
 
 # GPU 메모리 관리 함수
 def clear_gpu_memory():
@@ -16,6 +16,71 @@ def clear_gpu_memory():
         torch.cuda.empty_cache()
         torch.cuda.synchronize()
         gc.collect()
+
+def a_star_with_profiling(grid, start, goal, profiler=None):
+    """A* (Manhattan heuristic) 경로 계획 + 프로파일링"""
+    import heapq
+    if profiler:
+        profiler.start_profiling()
+
+    rows, cols = grid.shape
+
+    def heuristic(a, b):
+        return abs(a[0] - b[0]) + abs(a[1] - b[1])
+
+    open_heap = []  # (f, g, x, y)
+    heapq.heappush(open_heap, (heuristic(start, goal), 0, start[0], start[1]))
+    came_from = {}
+    g_score = {start: 0}
+    closed = set()
+
+    directions = [(-1, 0), (1, 0), (0, -1), (0, 1)]
+
+    while open_heap:
+        f, g, x, y = heapq.heappop(open_heap)
+        if profiler:
+            profiler.increment_operations(1)
+        if (x, y) in closed:
+            continue
+        closed.add((x, y))
+        if profiler:
+            profiler.increment_expansions(1)
+        if (x, y) == goal:
+            break
+
+        for dx, dy in directions:
+            nx, ny = x + dx, y + dy
+            if profiler:
+                profiler.increment_operations(4)
+            if 0 <= nx < rows and 0 <= ny < cols and grid[nx, ny] == 0 and (nx, ny) not in closed:
+                tentative_g = g + 1
+                if tentative_g < g_score.get((nx, ny), float('inf')):
+                    g_score[(nx, ny)] = tentative_g
+                    came_from[(nx, ny)] = (x, y)
+                    nf = tentative_g + heuristic((nx, ny), goal)
+                    heapq.heappush(open_heap, (nf, tentative_g, nx, ny))
+                    if profiler:
+                        profiler.increment_operations(2)
+
+    # 경로 재구성
+    if goal not in came_from and goal != start:
+        if profiler:
+            profiler.end_profiling()
+        return [], (profiler.get_results() if profiler else {})
+
+    path = []
+    cur = goal
+    while True:
+        path.append(cur)
+        if cur == start:
+            break
+        cur = came_from.get(cur)
+        if profiler:
+            profiler.increment_operations(1)
+
+    if profiler:
+        profiler.end_profiling()
+    return path[::-1], (profiler.get_results() if profiler else {})
 
 def create_connected_environment(grid_size, obstacle_density, dynamic_obstacles=0):
     """연결 가능한 환경 생성 (경로 차단 방지)"""
@@ -33,7 +98,7 @@ def create_connected_environment(grid_size, obstacle_density, dynamic_obstacles=
     def check_connectivity():
         """시작점에서 목표점까지 경로가 있는지 확인"""
         try:
-            from amr_path_planning_irl import ComputationalProfiler
+            from irl_training.amr_path_planning_irl import ComputationalProfiler
             profiler = ComputationalProfiler()
             path, _, _, _ = env.get_optimal_path_mathematical("dijkstra", profiler)
             return len(path) > 1  # 경로가 있고 길이가 1보다 큼
@@ -123,7 +188,7 @@ def run_algorithms_safe(grid_size=10, obstacle_density=0.3, dynamic_obstacles=0)
         start_time = time.time()
         
         # 연산량 측정을 위한 프로파일러 생성
-        from amr_path_planning_irl import ComputationalProfiler
+        from irl_training.amr_path_planning_irl import ComputationalProfiler
         profiler = ComputationalProfiler()
         
         dijkstra_path, _, _, profiler_results = env.get_optimal_path_mathematical("dijkstra", profiler=profiler)
@@ -150,8 +215,8 @@ def run_algorithms_safe(grid_size=10, obstacle_density=0.3, dynamic_obstacles=0)
         print("Running IRL...")
         start_time = time.time()
         # IRL 모델 경로 확인
-        irl_model_path = "saved_models/10x10_dijkstra/irl_model_10x10_Dijkstra.pth"
-        irl_stats_path = "saved_models/10x10_dijkstra/irl_model_10x10_Dijkstra_stats.json"
+        irl_model_path = "irl_training/models/10x10_dijkstra/irl_model_10x10_Dijkstra.pth"
+        irl_stats_path = "irl_training/models/10x10_dijkstra/irl_model_10x10_Dijkstra_stats.json"
         
         if os.path.exists(irl_model_path) and os.path.exists(irl_stats_path):
             irl_reward_predictor, _ = load_model(irl_model_path, irl_stats_path)
@@ -181,7 +246,29 @@ def run_algorithms_safe(grid_size=10, obstacle_density=0.3, dynamic_obstacles=0)
         print(f"IRL error: {e}")
         results['irl'] = {'path': None, 'time': 0, 'training_time': 0, 'operations': 0, 'inferences': 0}
     
-    # 3. DQN (개선된 DQN)
+    # 3. A* (Manhattan Heuristic)
+    try:
+        print("Running A*...")
+        start_time = time.time()
+        from irl_training.amr_path_planning_irl import ComputationalProfiler
+        a_profiler = ComputationalProfiler()
+        a_path, a_stats = a_star_with_profiling(env.grid, env.start_pos, env.goal_pos, profiler=a_profiler)
+        a_time = time.time() - start_time
+        a_operations = a_stats.get('operations_count', 0)
+        a_expansions = a_stats.get('state_expansions', 0)
+        results['astar'] = {
+            'path': a_path,
+            'time': a_time,
+            'training_time': 0,
+            'operations': a_operations,
+            'expansions': a_expansions
+        }
+        print(f"A*: Length={len(a_path) if a_path else 'N/A'}, Time={a_time:.3f}s, Operations={a_operations}")
+    except Exception as e:
+        print(f"A* error: {e}")
+        results['astar'] = {'path': None, 'time': 0, 'training_time': 0, 'operations': 0, 'expansions': 0}
+
+    # 4. DQN (개선된 DQN)
     try:
         print("Training DQN...")
         start_time = time.time()
@@ -272,7 +359,7 @@ def visualize_paths_simple(env, results, grid_size):
     
     # 경로들 표시
     colors = ['blue', 'purple', 'green', 'red', 'orange']
-    algorithms = ['dijkstra', 'irl', 'dqn']  # DQN으로 변경
+    algorithms = ['dijkstra', 'irl', 'astar', 'dqn']
     
     for i, alg in enumerate(algorithms):
         if alg in results and results[alg]['path']:
@@ -405,7 +492,7 @@ def create_comparison_plots(all_results, grid_sizes):
     print(f"{'='*80}")
     
     # 데이터 준비
-    algorithms = ['dijkstra', 'irl', 'dqn']
+    algorithms = ['dijkstra', 'irl', 'astar', 'dqn']
     metrics = ['path_length', 'operations', 'path_quality']
     
     # 각 메트릭별로 데이터 수집

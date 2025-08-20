@@ -16,7 +16,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 
-from amr_path_planning_irl import AMRGridworld, extract_features, maxent_irl_gpu
+from .amr_path_planning_irl import AMRGridworld, extract_features, maxent_irl_gpu
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f"Using device: {device}")
@@ -363,8 +363,8 @@ def dijkstra_irl_learning_experiment():
     print("=" * 80)
     
     # 저장 폴더
-    model_dir = "saved_models/10x10_dijkstra"
-    result_dir = "experiment_results/10x10_dijkstra"
+    model_dir = "irl_training/models/10x10_dijkstra"
+    result_dir = "irl_training/results/10x10_dijkstra"
     os.makedirs(model_dir, exist_ok=True)
     os.makedirs(result_dir, exist_ok=True)
     

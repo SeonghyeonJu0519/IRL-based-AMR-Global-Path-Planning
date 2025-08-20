@@ -384,7 +384,7 @@ def irl_rrt(start, goal, env, irl_reward_predictor, max_iterations=5000, step_si
 
 def extract_features(state, env):
     """상태를 특성 벡터로 변환 (IRL과 동일한 함수 사용)"""
-    from amr_path_planning_irl import extract_features
+    from irl_training.amr_path_planning_irl import extract_features
     return extract_features(state, env)
 
 def visualize_rrt_paths(env, basic_path, irl_path, grid_size):
@@ -446,8 +446,8 @@ def rrt_path_planning(env, max_iterations=1000, use_irl=False, irl_reward_predic
 
 if __name__ == "__main__":
     # 테스트
-    from amr_path_planning_irl import AMRGridworld
-    from dijkstra_irl_learning import load_model
+    from irl_training.amr_path_planning_irl import AMRGridworld
+    from irl_training.dijkstra_irl_learning import load_model
     import os
     
     # 테스트 환경 생성
@@ -467,8 +467,8 @@ if __name__ == "__main__":
         print(f"Path: {basic_path[:5]}...{basic_path[-5:] if len(basic_path) > 10 else basic_path}")
     
     # IRL-RRT 테스트
-    irl_model_path = "saved_models/10x10_dijkstra/irl_model_10x10_Dijkstra.pth"
-    irl_stats_path = "saved_models/10x10_dijkstra/irl_model_10x10_Dijkstra_stats.json"
+    irl_model_path = "irl_training/models/10x10_dijkstra/irl_model_10x10_Dijkstra.pth"
+    irl_stats_path = "irl_training/models/10x10_dijkstra/irl_model_10x10_Dijkstra_stats.json"
     
     if os.path.exists(irl_model_path) and os.path.exists(irl_stats_path):
         print("\nTesting IRL-RRT...")

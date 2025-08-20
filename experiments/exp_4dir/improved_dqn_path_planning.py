@@ -10,7 +10,7 @@ import time
 import copy
 import os
 
-from amr_path_planning_irl import AMRGridworld
+from irl_training.amr_path_planning_irl import AMRGridworld
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -211,6 +211,8 @@ def train_improved_dqn(env, episodes=1000, max_steps=500):
         state = agent.get_state_features(env, current_pos)
         total_reward = 0
         steps = 0
+        # 재방문 추적(학습 전용)
+        visited_positions = set([current_pos])
         
         for step in range(max_steps):
             # 행동 선택
@@ -228,6 +230,12 @@ def train_improved_dqn(env, episodes=1000, max_steps=500):
             
             # 보상 계산
             reward = calculate_reward(env, current_pos, next_pos, env.goal_pos)
+
+            # 재방문 페널티(우회 허용하되 루프 억제)
+            if next_pos in visited_positions:
+                reward -= 10.0  # 필요 시 -5~-15 범위에서 조정
+            else:
+                visited_positions.add(next_pos)
             
             # 다음 상태
             next_state = agent.get_state_features(env, next_pos)
@@ -282,80 +290,38 @@ def improved_dqn_path_planning(env, agent, profiler=None):
         if profiler:
             profiler.increment_neural_inferences(1)  # 신경망 추론 횟수 증가
         
-        # 행동 실행
-        if action == 0:  # 상
-            next_pos = (max(0, current_pos[0] - 1), current_pos[1])
-        elif action == 1:  # 하
-            next_pos = (min(env.grid_size - 1, current_pos[0] + 1), current_pos[1])
-        elif action == 2:  # 좌
-            next_pos = (current_pos[0], max(0, current_pos[1] - 1))
-        else:  # 우
-            next_pos = (current_pos[0], min(env.grid_size - 1, current_pos[1] + 1))
-        
-        # 장애물 체크 및 방문 체크
-        if (env.grid[next_pos[0], next_pos[1]] == 0 and 
-            next_pos not in visited):
-            current_pos = next_pos
-            path.append(current_pos)
-            visited.add(current_pos)
-        else:
-            # 대안 경로 찾기 - 더 강력한 로직
-            best_action = None
-            best_score = float('-inf')
-            
-            for test_action in range(4):
-                if test_action == 0:  # 상
-                    test_pos = (max(0, current_pos[0] - 1), current_pos[1])
-                elif test_action == 1:  # 하
-                    test_pos = (min(env.grid_size - 1, current_pos[0] + 1), current_pos[1])
-                elif test_action == 2:  # 좌
-                    test_pos = (current_pos[0], max(0, current_pos[1] - 1))
-                else:  # 우
-                    test_pos = (current_pos[0], min(env.grid_size - 1, current_pos[1] + 1))
-                
-                if (env.grid[test_pos[0], test_pos[1]] == 0 and 
-                    test_pos not in visited):
-                    # 목표까지의 거리
-                    dist_to_goal = abs(test_pos[0] - env.goal_pos[0]) + abs(test_pos[1] - env.goal_pos[1])
-                    # 현재 위치에서의 거리
-                    current_dist = abs(current_pos[0] - env.goal_pos[0]) + abs(current_pos[1] - env.goal_pos[1])
-                    
-                    # 거리가 줄어들면 높은 점수
-                    score = current_dist - dist_to_goal
-                    
-                    # 목표 방향으로 가는 경우 추가 보너스
-                    if test_pos[0] <= env.goal_pos[0] and test_pos[1] <= env.goal_pos[1]:
-                        score += 2
-                    
-                    if score > best_score:
-                        best_score = score
-                        best_action = test_action
-            
-            if best_action is not None:
-                if best_action == 0:  # 상
-                    current_pos = (max(0, current_pos[0] - 1), current_pos[1])
-                elif best_action == 1:  # 하
-                    current_pos = (min(env.grid_size - 1, current_pos[0] + 1), current_pos[1])
-                elif best_action == 2:  # 좌
-                    current_pos = (current_pos[0], max(0, current_pos[1] - 1))
-                else:  # 우
-                    current_pos = (current_pos[0], min(env.grid_size - 1, current_pos[1] + 1))
-                
-                path.append(current_pos)
-                visited.add(current_pos)
-            else:
-                print(f"Stuck at step {step}, no valid moves")
-                # 마지막 시도: 목표점으로 직접 이동 시도
-                if current_pos[0] < env.goal_pos[0] and current_pos[0] + 1 < env.grid_size and env.grid[current_pos[0] + 1, current_pos[1]] == 0:
-                    current_pos = (current_pos[0] + 1, current_pos[1])
-                    path.append(current_pos)
-                    visited.add(current_pos)
-                elif current_pos[1] < env.goal_pos[1] and current_pos[1] + 1 < env.grid_size and env.grid[current_pos[0], current_pos[1] + 1] == 0:
-                    current_pos = (current_pos[0], current_pos[1] + 1)
-                    path.append(current_pos)
-                    visited.add(current_pos)
-                else:
+        # 후보 이동(우선: 미방문 유효칸 → 없으면 재방문 유효칸)
+        def moved(pos, a):
+            if a == 0:
+                return (max(0, pos[0] - 1), pos[1])
+            if a == 1:
+                return (min(env.grid_size - 1, pos[0] + 1), pos[1])
+            if a == 2:
+                return (pos[0], max(0, pos[1] - 1))
+            return (pos[0], min(env.grid_size - 1, pos[1] + 1))
+
+        candidates = [action] + [a for a in range(4) if a != action]
+        next_pos = None
+        # 1) 미방문 유효칸
+        for a in candidates:
+            cand = moved(current_pos, a)
+            if env.grid[cand[0], cand[1]] == 0 and cand not in visited:
+                next_pos = cand
+                break
+        # 2) 재방문 유효칸 허용
+        if next_pos is None:
+            for a in candidates:
+                cand = moved(current_pos, a)
+                if env.grid[cand[0], cand[1]] == 0:
+                    next_pos = cand
                     break
+        if next_pos is None:
+            print(f"Stuck at step {step}, no valid moves")
+            break
+
+        current_pos = next_pos
+        path.append(current_pos)
+        visited.add(current_pos)
         
         # 진행 상황 출력
         if step % 10 == 0:
