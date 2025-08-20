@@ -83,6 +83,148 @@ class RewardPredictor(nn.Module):
     def forward(self, x):
         return self.network(x)
 
+def normalize_reward(value, r_min=-1.0, r_max=-1.0):
+    """보상값을 [0,1]로 정규화. r_min==r_max인 경우 안전 처리."""
+    # r_min/r_max가 비정상인 경우 기본값으로 설정
+    if r_max <= r_min:
+        r_min, r_max = -1.0, 1.0
+    # 클리핑 후 정규화
+    value = max(min(value, r_max), r_min)
+    return (value - r_min) / (r_max - r_min)
+
+def count_adjacent_obstacles(env, x, y):
+    """8-이웃 내 장애물 개수(핸드크래프트 비용용 간단 클리어런스 대용)"""
+    count = 0
+    for dx in (-1, 0, 1):
+        for dy in (-1, 0, 1):
+            if dx == 0 and dy == 0:
+                continue
+            nx, ny = x + dx, y + dy
+            if 0 <= nx < env.grid_size and 0 <= ny < env.grid_size:
+                if env.grid[nx, ny] != 0:
+                    count += 1
+    return count
+
+def get_direction(from_state, to_state, grid_size):
+    """이전-다음 상태로부터 이동 방향(dx, dy) 반환"""
+    fx, fy = from_state // grid_size, from_state % grid_size
+    tx, ty = to_state // grid_size, to_state % grid_size
+    return (tx - fx, ty - fy)
+
+def a_star_with_cost_mode(
+    env,
+    mode="unit",  # 'unit' | 'handcrafted' | 'irl'
+    reward_predictor=None,
+    lambda_reward=0.8,  # IRL 보상 반영 강도
+    w_turn=0.2,         # 회전 패널티 가중치(핸드크래프트/IRL 공통)
+    w_clear=0.15,       # 인접 장애물 패널티 가중치(핸드크래프트)
+    r_min=-1.0,
+    r_max=1.0
+):
+    """
+    비용 모드를 바꿔가며 A* 경로 계획 수행.
+
+    Returns: path(list of states), stats(dict)
+    stats = { 'expanded': int, 'cost': float }
+    """
+    start_state = env.start_pos[0] * env.grid_size + env.start_pos[1]
+    goal_state = env.goal_pos[0] * env.grid_size + env.goal_pos[1]
+
+    # 우선순위 큐 대용 (작은 맵 기준 간단 구현)
+    open_set = [(0.0, start_state)]
+    came_from = {}
+    g_score = {start_state: 0.0}
+    expansions = 0
+
+    # 시작 방향은 정의되지 않음
+    prev_direction = {start_state: (0, 0)}
+
+    # 휴리스틱: 맨해튼 × 최소 스텝비용(보수적으로 1.0 사용)
+    def heuristic(state):
+        x, y = state // env.grid_size, state % env.grid_size
+        return abs(x - env.goal_pos[0]) + abs(y - env.goal_pos[1])
+
+    while open_set:
+        current = open_set.pop(0)[1]
+        if current == goal_state:
+            # 경로 재구성
+            path = []
+            while current in came_from:
+                path.append(current)
+                current = came_from[current]
+            path.append(start_state)
+            path = path[::-1]
+            return path, {
+                'expanded': expansions,
+                'cost': g_score[path[-1]] if path else float('inf')
+            }
+
+        expansions += 1
+        cx, cy = current // env.grid_size, current % env.grid_size
+
+        for dx, dy in [(-1,0), (1,0), (0,-1), (0,1)]:
+            nx, ny = cx + dx, cy + dy
+            if not (0 <= nx < env.grid_size and 0 <= ny < env.grid_size):
+                continue
+            if env.grid[nx, ny] != 0:
+                continue
+
+            neighbor = nx * env.grid_size + ny
+
+            # 기본 이동 비용(4방향)
+            move_cost = 1.0
+
+            # 방향 전환 패널티(직전 방향 대비)
+            turn_penalty = 0.0
+            prev_dir = prev_direction.get(current, (0, 0))
+            cur_dir = (dx, dy)
+            if prev_dir != (0, 0) and cur_dir != prev_dir:
+                turn_penalty = w_turn
+
+            # 모드별 추가 비용 계산
+            extra_cost = 0.0
+            if mode == "unit":
+                # 아무 추가비용 없음
+                extra_cost = 0.0
+            elif mode == "handcrafted":
+                # 주변 장애물 밀집도 패널티(가까울수록 ↑)
+                adj_obs = count_adjacent_obstacles(env, nx, ny)
+                clearance_penalty = w_clear * adj_obs
+                extra_cost = clearance_penalty + turn_penalty
+            elif mode == "irl":
+                if reward_predictor is None:
+                    raise ValueError("IRL 모드에는 reward_predictor가 필요합니다.")
+                # IRL 보상 예측 → [0,1] 정규화 → 비용으로 변환
+                features = extract_features(neighbor, env)
+                dev = next(reward_predictor.parameters()).device
+                with torch.no_grad():
+                    r = reward_predictor(features.unsqueeze(0).to(dev)).item()
+                r_norm = normalize_reward(r, r_min=r_min, r_max=r_max)
+                irl_cost = lambda_reward * (1.0 - r_norm)
+                extra_cost = irl_cost + turn_penalty
+            else:
+                raise ValueError(f"Unknown mode: {mode}")
+
+            step_cost = move_cost + extra_cost
+            tentative_g = g_score[current] + step_cost
+
+            if neighbor not in g_score or tentative_g < g_score[neighbor]:
+                came_from[neighbor] = current
+                g_score[neighbor] = tentative_g
+                prev_direction[neighbor] = cur_dir
+
+                h = heuristic(neighbor) * 1.0  # 최소 스텝비용 하한=1.0
+                f = tentative_g + h
+
+                # open_set 중복 체크(간단 구현)
+                if neighbor not in [it[1] for it in open_set]:
+                    open_set.append((f, neighbor))
+
+        open_set.sort()
+
+    # 실패 시 시작만 반환
+    return [start_state], { 'expanded': expansions, 'cost': float('inf') }
+
 def train_irl_model(algorithm="dijkstra", grid_size=20, obstacle_density=0.15, dynamic_obstacles=4):
     """
     다익스트라/Bellman-Ford 기반 IRL 모델 학습
@@ -422,58 +564,41 @@ def dijkstra_irl_learning_experiment():
     print("MANHATTAN DISTANCE BASED PATH QUALITY ANALYSIS")
     print(f"{'='*80}")
     
-    # 테스트 환경에서 경로 품질 분석
+    # 테스트 환경에서 경로 품질 분석 (기준비교: 단위/핸드크래프트/IRL 비용)
     test_env = AMRGridworld(grid_size=10, obstacle_density=0.15, dynamic_obstacles=2)
-    
-    print("Testing path quality on 10x10 environment...")
-    
-    # Dijkstra 경로 계산
-    dijkstra_path, _, _, _ = test_env.get_optimal_path_mathematical("dijkstra")
-    
-    # IRL 가이드 경로 계산
-    reward_predictor, _ = load_model(
+
+    print("Testing path quality on 10x10 environment (Baseline Cost Modes)...")
+
+    # 학습된 IRL 모델 로드
+    reward_predictor, stats_loaded = load_model(
         results['10x10_Dijkstra']['model_filename'],
         results['10x10_Dijkstra']['stats_filename']
     )
-    irl_path = irl_guided_search(test_env, reward_predictor)
-    
+
+    # r 범위 추정(안전 기본값 사용; 필요 시 stats_loaded로 조정 가능)
+    r_min, r_max = -1.0, 1.0
+
+    # 3가지 비용 모드로 경로 계산
+    unit_path, unit_stats = a_star_with_cost_mode(test_env, mode="unit")
+    hand_path, hand_stats = a_star_with_cost_mode(test_env, mode="handcrafted")
+    irl_path, irl_stats_plan = a_star_with_cost_mode(
+        test_env, mode="irl", reward_predictor=reward_predictor,
+        lambda_reward=0.8, w_turn=0.2, w_clear=0.15, r_min=r_min, r_max=r_max
+    )
+
     # 경로 품질 분석
-    dijkstra_analysis = analyze_path_quality(dijkstra_path, test_env.start_pos, test_env.goal_pos, test_env.grid_size)
+    unit_analysis = analyze_path_quality(unit_path, test_env.start_pos, test_env.goal_pos, test_env.grid_size)
+    hand_analysis = analyze_path_quality(hand_path, test_env.start_pos, test_env.goal_pos, test_env.grid_size)
     irl_analysis = analyze_path_quality(irl_path, test_env.start_pos, test_env.goal_pos, test_env.grid_size)
-    
-    print("\nPath Quality Comparison (Manhattan Distance Based):")
-    print("-" * 80)
-    print("Algorithm | Nodes | Actual Dist | Ideal Dist | Efficiency | Detour Ratio | Quality")
-    print("-" * 80)
-    
-    print(f"Dijkstra   | {dijkstra_analysis['node_count']:>5} | {dijkstra_analysis['actual_distance']:>11} | {dijkstra_analysis['ideal_distance']:>10} | {dijkstra_analysis['efficiency']:>9.3f} | {dijkstra_analysis['detour_ratio']:>11.2f} | {dijkstra_analysis['path_quality']}")
-    print(f"IRL        | {irl_analysis['node_count']:>5} | {irl_analysis['actual_distance']:>11} | {irl_analysis['ideal_distance']:>10} | {irl_analysis['efficiency']:>9.3f} | {irl_analysis['detour_ratio']:>11.2f} | {irl_analysis['path_quality']}")
-    
-    # 개선율 계산
-    if dijkstra_analysis['actual_distance'] > 0 and irl_analysis['actual_distance'] > 0:
-        distance_improvement = (dijkstra_analysis['actual_distance'] - irl_analysis['actual_distance']) / dijkstra_analysis['actual_distance'] * 100
-        efficiency_improvement = (irl_analysis['efficiency'] - dijkstra_analysis['efficiency']) / dijkstra_analysis['efficiency'] * 100
-        
-        print(f"\nImprovement Analysis:")
-        print(f"  • Distance improvement: {distance_improvement:+.1f}%")
-        print(f"  • Efficiency improvement: {efficiency_improvement:+.1f}%")
-        
-        if distance_improvement > 0:
-            print(f"  ✅ IRL found shorter actual distance!")
-        else:
-            print(f"  📏 Dijkstra found shorter actual distance")
-            
-        if efficiency_improvement > 0:
-            print(f"  ✅ IRL achieved higher efficiency!")
-        else:
-            print(f"  📉 Dijkstra achieved higher efficiency")
-    
-    print(f"\nKey Insights:")
-    print(f"  • Ideal distance: {dijkstra_analysis['ideal_distance']} (Manhattan distance without obstacles)")
-    print(f"  • Detour ratio > 1.0 means path is longer than ideal")
-    print(f"  • Efficiency closer to 1.0 means more optimal path")
-    print(f"  • Node count ≠ actual distance (due to diagonal vs orthogonal movement)")
-    
+
+    print("\nBaseline Path Quality Comparison (Manhattan Distance Based):")
+    print("-" * 100)
+    print("Mode        | Nodes | Actual Dist | Ideal Dist | Efficiency | Detour Ratio | Quality | Expanded | Total Cost")
+    print("-" * 100)
+    print(f"Unit        | {unit_analysis['node_count']:>5} | {unit_analysis['actual_distance']:>11} | {unit_analysis['ideal_distance']:>10} | {unit_analysis['efficiency']:>9.3f} | {unit_analysis['detour_ratio']:>11.2f} | {unit_analysis['path_quality']:<10} | {unit_stats['expanded']:>8} | {unit_stats['cost']:.2f}")
+    print(f"Handcrafted | {hand_analysis['node_count']:>5} | {hand_analysis['actual_distance']:>11} | {hand_analysis['ideal_distance']:>10} | {hand_analysis['efficiency']:>9.3f} | {hand_analysis['detour_ratio']:>11.2f} | {hand_analysis['path_quality']:<10} | {hand_stats['expanded']:>8} | {hand_stats['cost']:.2f}")
+    print(f"IRL         | {irl_analysis['node_count']:>5} | {irl_analysis['actual_distance']:>11} | {irl_analysis['ideal_distance']:>10} | {irl_analysis['efficiency']:>9.3f} | {irl_analysis['detour_ratio']:>11.2f} | {irl_analysis['path_quality']:<10} | {irl_stats_plan['expanded']:>8} | {irl_stats_plan['cost']:.2f}")
+
     # 시각화 (폴더 내 저장)
     create_training_visualization(results, save_dir=result_dir)
     
